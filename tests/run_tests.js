@@ -10,7 +10,10 @@ var Dedupe = require("../rules/dedupe").Dedupe;
 var StateMachine = require("../runtime/state_machine").StateMachine;
 var TaskQueue = require("../runtime/task_queue").TaskQueue;
 var FriendAddFlow = require("../wechat/friend_add_flow").FriendAddFlow;
+var ProactiveMessageFlow = require("../wechat/proactive_message_flow").ProactiveMessageFlow;
 var WechatAdapter = require("../wechat/adapter").Adapter;
+var MqttClient = require("../mqtt/client").MqttClient;
+var parseMqttCommand = require("../mqtt/client").parseCommand;
 
 var passed = 0;
 function test(name, fn) {
@@ -31,6 +34,51 @@ function makeStore() {
 function makeLogger(store) {
   return new Logger(store, { limit: 200 });
 }
+
+test("mqtt command parser enforces the allowlist and preserves payload", function () {
+  var parsed = parseMqttCommand({ topic: "wxbot/device/command", payload: JSON.stringify({ id: "c1", type: "proactive_message_search", payload: { target: "Alice", message: "hello" } }) }, ["proactive_message_search"]);
+  assert.strictEqual(parsed.ok, true);
+  assert.strictEqual(parsed.command.id, "c1");
+  assert.strictEqual(parsed.command.payload.target, "Alice");
+  assert.strictEqual(parseMqttCommand({ payload: JSON.stringify({ type: "stop_worker" }) }, ["proactive_message_search"]).code, "MQTT_COMMAND_NOT_ALLOWED");
+  assert.strictEqual(parseMqttCommand({ payload: "not-json" }, []).code, "MQTT_COMMAND_JSON_INVALID");
+});
+
+test("mqtt client uses configured topics and drains inbound messages", function () {
+  var fake = { client: null, options: null };
+  function FakeOptions() { this.values = {}; }
+  FakeOptions.prototype.setAutomaticReconnect = function (value) { this.values.autoReconnect = value; };
+  FakeOptions.prototype.setCleanSession = function (value) { this.values.cleanSession = value; };
+  FakeOptions.prototype.setUserName = function (value) { this.values.username = value; };
+  FakeOptions.prototype.setPassword = function (value) { this.values.password = value; };
+  FakeOptions.prototype.setWill = function () { this.values.will = Array.prototype.slice.call(arguments); };
+  function FakeClient(context, uri, id) {
+    this.context = context; this.uri = uri; this.id = id; this.published = [];
+    fake.client = this;
+  }
+  FakeClient.prototype.setCallback = function (callback) { this.callback = callback; };
+  FakeClient.prototype.connect = function (options, userdata, listener) { fake.options = options; listener.onSuccess(); this.callback.connectComplete(false, this.uri); };
+  FakeClient.prototype.subscribe = function (topic, qos, userdata, listener) { this.topic = topic; this.qos = qos; listener.onSuccess(); };
+  FakeClient.prototype.publish = function (topic, bytes, qos, retained) { this.published.push({ topic: topic, payload: String(bytes), qos: qos, retained: retained }); };
+  FakeClient.prototype.close = function () {};
+  FakeClient.prototype.disconnect = function () {};
+  var events = [];
+  var client = new MqttClient({
+    context: {},
+    config: { enabled: true, serverUri: "tcp://broker:1883", clientId: "device-1", commandTopic: "in/{clientId}", eventTopic: "out/{clientId}", username: "u", password: "p" },
+    api: { MqttAndroidClient: FakeClient, MqttConnectOptions: FakeOptions, MqttCallbackExtended: function (value) { return value; }, IMqttActionListener: function (value) { return value; } },
+    onEvent: function (event) { events.push(event.type); }
+  });
+  assert.strictEqual(client.start().ok, true);
+  assert.strictEqual(client.status().connected, true);
+  assert.strictEqual(fake.client.topic, "in/device-1");
+  fake.client.callback.messageArrived("in/device-1", { toString: function () { return JSON.stringify({ type: "scan_wechat_badges" }); } });
+  var received = [];
+  assert.strictEqual(client.drainMessages(1, function (item) { received.push(item.topic); }), 1);
+  assert.deepStrictEqual(received, ["in/device-1"]);
+  assert.strictEqual(client.publishEvent("status", { ok: true }).topic, "out/device-1");
+  assert.ok(events.indexOf("connected") >= 0);
+});
 
 test("defaults normalize and legacy keyword migration", function () {
   var config = migrations.migrate({ keyword_dict: { hello: "world" } }, defaults);
@@ -380,6 +428,63 @@ test("wechat profile returns to chat after missing WeChat ID", function () {
   assert.strictEqual(result.chatName, "AliceFull");
   assert.strictEqual(result.remarkName, "AliceFull");
   assert.strictEqual(backCount, 2);
+});
+
+test("proactive message flow locates a full remark and requires confirmation", function () {
+  var store = makeStore();
+  var logger = makeLogger(store);
+  var now = 1700000000000;
+  var calls = [];
+  var adapter = {
+    openChatByTarget: function (target) { calls.push("open:" + target); return { ok: true, chatName: "Alice 的完整备注" }; },
+    verifyCurrentChatTarget: function (target, name) { calls.push("verify:" + target + ":" + name); return { ok: true }; },
+    sendText: function (message) { calls.push("send:" + message); return { ok: true }; }
+  };
+  var flow = new ProactiveMessageFlow({ store: store, adapter: adapter, logger: logger, clock: function () { return now; } });
+  var searched = flow.search({ target: "Alice 的完整备注", message: "你好，主动消息" });
+  assert.strictEqual(searched.ok, true);
+  assert.strictEqual(searched.task.type, "proactive_message");
+  assert.strictEqual(searched.task.status, "waiting_confirm");
+  assert.deepStrictEqual(calls, ["open:Alice 的完整备注"]);
+  var sent = flow.confirm(searched.task.id);
+  assert.strictEqual(sent.ok, true);
+  assert.strictEqual(sent.task.status, "sent");
+  assert.deepStrictEqual(calls, ["open:Alice 的完整备注", "verify:Alice 的完整备注:Alice 的完整备注", "send:你好，主动消息"]);
+  assert.strictEqual(store.getRuntime().lastProactiveMessageAt, now);
+});
+
+test("proactive message flow accepts a WeChat ID and blocks cooldown", function () {
+  var store = makeStore();
+  var logger = makeLogger(store);
+  var now = 1700000000000;
+  var adapter = {
+    openChatByTarget: function (target) { return { ok: true, chatName: "Alice" , target: target }; },
+    verifyCurrentChatTarget: function () { return { ok: true }; },
+    sendText: function () { return { ok: true }; }
+  };
+  var flow = new ProactiveMessageFlow({ store: store, adapter: adapter, logger: logger, clock: function () { return now; } });
+  var searched = flow.search({ target: "wxid_alice", message: "测试" });
+  assert.strictEqual(searched.ok, true);
+  assert.strictEqual(flow.confirm(searched.task.id).ok, true);
+  var blocked = flow.search({ target: "wxid_bob", message: "再次测试" });
+  assert.strictEqual(blocked.ok, false);
+  assert.strictEqual(blocked.guard.code, "PROACTIVE_MESSAGE_COOLDOWN");
+});
+
+test("proactive message flow refuses to send after chat target changes", function () {
+  var store = makeStore();
+  var logger = makeLogger(store);
+  var adapter = {
+    openChatByTarget: function () { return { ok: true, chatName: "Alice" }; },
+    verifyCurrentChatTarget: function () { return { ok: false, code: "CHAT_TARGET_CHANGED" }; },
+    sendText: function () { throw new Error("must not send"); }
+  };
+  var flow = new ProactiveMessageFlow({ store: store, adapter: adapter, logger: logger, clock: function () { return 1700000000000; } });
+  var task = flow.search({ target: "Alice", message: "不应发送" }).task;
+  var result = flow.confirm(task.id);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.task.status, "failed");
+  assert.strictEqual(result.task.errorCode, "CHAT_TARGET_CHANGED");
 });
 
 test("active friend add flow requires confirmation and records sent task", function () {

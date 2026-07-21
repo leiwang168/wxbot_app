@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   "use strict";
 
   var VERSION = 1;
@@ -33,6 +33,41 @@
       requireConfirm: true,
       defaultVerifyText: "",
       defaultRemark: ""
+    },
+    proactiveMessage: {
+      enabled: true,
+      normalIntervalSec: 30,
+      dailyLimit: 20,
+      rateLimitCooldownSec: 3600,
+      requireConfirm: true
+    },
+    mqtt: {
+      enabled: false,
+      serverUri: "",
+      clientId: "",
+      username: "",
+      password: "",
+      commandTopic: "wxbot/{clientId}/command",
+      eventTopic: "wxbot/{clientId}/event",
+      qos: 1,
+      retained: false,
+      cleanSession: true,
+      autoReconnect: true,
+      reconnectIntervalSec: 10,
+      willTopic: "wxbot/{clientId}/status",
+      willMessage: "offline",
+      willQos: 1,
+      willRetained: true,
+      allowedCommands: [
+        "add_friend_search",
+        "add_friend_confirm",
+        "add_friend_cancel",
+        "proactive_message_search",
+        "proactive_message_confirm",
+        "proactive_message_cancel",
+        "scan_wechat_badges",
+        "read_current_friend_profile"
+      ]
     },
     diagnostics: {
       keepLogCount: 200,

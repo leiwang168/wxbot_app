@@ -41,6 +41,24 @@
 
         <card marginTop="12" cardCornerRadius="8dp" cardElevation="2dp">
           <vertical padding="12">
+            <text text="MQTT 远程控制与状态上报" textSize="18sp" />
+            <text text="使用 AutoX.js Rhino Paho MQTT；命令仍进入串行队列，主动发送仍需二次确认。" textSize="12sp" textColor="#5f6368" />
+            <input id="mqttServer" hint="Broker 地址，例如 tcp://192.168.1.10:1883" marginTop="6" />
+            <input id="mqttClientId" hint="clientId（必须唯一）" />
+            <input id="mqttUsername" hint="用户名（可选）" />
+            <input id="mqttPassword" hint="密码（可选）" />
+            <input id="mqttCommandTopic" hint="命令主题，支持 {clientId}" />
+            <input id="mqttEventTopic" hint="事件主题，支持 {clientId}" />
+            <horizontal>
+              <button id="mqttSaveButton" text="保存 MQTT 配置" layout_weight="1" />
+              <button id="mqttToggleButton" text="启用 MQTT" layout_weight="1" />
+            </horizontal>
+            <text id="mqttStatus" text="MQTT：未配置" textSize="13sp" marginTop="6" />
+          </vertical>
+        </card>
+
+        <card marginTop="12" cardCornerRadius="8dp" cardElevation="2dp">
+          <vertical padding="12">
             <text text="主动添加好友" textSize="18sp" />
             <text text="首版只支持微信号或 wxid；搜索后必须二次确认。" textSize="12sp" textColor="#5f6368" />
             <input id="friendTarget" hint="微信号 / wxid" marginTop="6" />
@@ -53,6 +71,22 @@
             </horizontal>
             <text id="friendResult" text="尚未搜索" textSize="13sp" marginTop="6" />
             <text id="friendHistory" text="最近任务：无" textSize="12sp" />
+          </vertical>
+        </card>
+
+        <card marginTop="12" cardCornerRadius="8dp" cardElevation="2dp">
+          <vertical padding="12">
+            <text text="主动给好友发消息" textSize="18sp" />
+            <text text="输入完整备注名或微信号；定位后必须二次确认。" textSize="12sp" textColor="#5f6368" />
+            <input id="messageTarget" hint="完整备注名 / 微信号 / wxid" marginTop="6" />
+            <input id="messageText" hint="要发送的消息" />
+            <horizontal>
+              <button id="messageSearchButton" text="定位好友" layout_weight="1" />
+              <button id="messageConfirmButton" text="确认发送" enabled="false" layout_weight="1" />
+              <button id="messageCancelButton" text="取消" layout_weight="1" />
+            </horizontal>
+            <text id="messageResult" text="尚未定位" textSize="13sp" marginTop="6" />
+            <text id="messageHistory" text="最近消息任务：无" textSize="12sp" />
           </vertical>
         </card>
 
@@ -263,6 +297,31 @@
     return String(value || "").split(",").map(function (item) { return item.trim(); }).filter(function (item) { return !!item; });
   }
 
+  function saveMqttConfig() {
+    var config = store.loadConfig();
+    config.mqtt = config.mqtt || {};
+    config.mqtt.serverUri = textOf(ui.mqttServer).trim();
+    config.mqtt.clientId = textOf(ui.mqttClientId).trim();
+    config.mqtt.username = textOf(ui.mqttUsername);
+    config.mqtt.password = textOf(ui.mqttPassword);
+    config.mqtt.commandTopic = textOf(ui.mqttCommandTopic).trim() || "wxbot/{clientId}/command";
+    config.mqtt.eventTopic = textOf(ui.mqttEventTopic).trim() || "wxbot/{clientId}/event";
+    store.saveConfig(config);
+    ui.mqttStatus.setText("MQTT：配置已保存");
+    logger.info("MQTT 配置已保存", { serverUri: config.mqtt.serverUri, clientId: config.mqtt.clientId });
+    refresh();
+  }
+
+  function toggleMqtt() {
+    var config = store.loadConfig();
+    config.mqtt = config.mqtt || {};
+    config.mqtt.enabled = !config.mqtt.enabled;
+    store.saveConfig(config);
+    if (config.mqtt.enabled) startWorker();
+    logger.info(config.mqtt.enabled ? "MQTT 已启用" : "MQTT 已停用");
+    refresh();
+  }
+
   function saveReplyRule() {
     var config = store.loadConfig();
     var keyword = textOf(ui.replyKeyword);
@@ -300,10 +359,14 @@
     var runtime = store.getRuntime();
     var counters = runtime.counters || { friendAddsToday: 0, repliesToday: 0 };
     ui.statusText.setText("状态：" + (runtime.workerState || "STOPPED") + (runtime.heartbeatAt ? " · 心跳 " + Math.max(0, Math.floor((Date.now() - runtime.heartbeatAt) / 1000)) + " 秒前" : ""));
-    ui.counterText.setText("今日主动添加 " + (counters.friendAddsToday || 0) + " · 今日回复 " + (counters.repliesToday || 0));
+    ui.counterText.setText("今日主动添加 " + (counters.friendAddsToday || 0) + " · 主动消息 " + (counters.proactiveMessagesToday || 0) + " · 回复 " + (counters.repliesToday || 0));
     ui.errorText.setText("最近错误：" + (runtime.lastError || "无"));
     var checks = health.check(config);
     ui.permissionText.setText("无障碍：" + checks.autoAccessibility.status + "；通知监听：" + checks.notificationListener.status + "；微信：" + checks.wechatInstalled.status);
+    var mqttStatus = runtime.mqtt || {};
+    var mqttLabel = !config.mqtt || !config.mqtt.enabled ? "已关闭" : (mqttStatus.connected ? "已连接" : (mqttStatus.connecting ? "连接中" : "未连接"));
+    ui.mqttStatus.setText("MQTT：" + mqttLabel + (mqttStatus.lastError ? "；" + mqttStatus.lastError : "") + (mqttStatus.inboxSize ? "；待处理命令 " + mqttStatus.inboxSize : ""));
+    ui.mqttToggleButton.setText(config.mqtt && config.mqtt.enabled ? "停用 MQTT" : "启用 MQTT");
 
     var result = runtime.commandResult;
     if (result && result.type === "add_friend_search" && result.result) {
@@ -331,9 +394,28 @@
         ui.friendProfileResult.setText("读取失败：" + (profileResult.code || profileResult.errorCode || "UNKNOWN_ERROR"));
       }
     }
+    if (result && result.type === "proactive_message_search" && result.result) {
+      var messageSearchResult = result.result;
+      var messageTask = messageSearchResult.task || {};
+      if (messageTask.status === "waiting_confirm") {
+        ui.messageConfirmButton.setEnabled(true);
+        ui.messageResult.setText("已定位：" + (messageTask.matchedName || messageTask.target) + "；消息：" + messageTask.message + "。请确认发送。");
+      } else {
+        ui.messageConfirmButton.setEnabled(false);
+        ui.messageResult.setText("定位结果：" + (messageTask.status || messageSearchResult.guard && messageSearchResult.guard.code || "失败") + (messageTask.errorCode ? " [" + messageTask.errorCode + "]" : ""));
+      }
+    }
+    if (result && result.type === "proactive_message_confirm" && result.result) {
+      var messageConfirmTask = result.result.task || {};
+      ui.messageConfirmButton.setEnabled(false);
+      ui.messageResult.setText("发送结果：" + (messageConfirmTask.status || (result.result.ok ? "sent" : "failed")) + (messageConfirmTask.errorCode ? " [" + messageConfirmTask.errorCode + "]" : ""));
+    }
 
     var tasks = store.getTasks().slice(-5).reverse();
-    ui.friendHistory.setText("最近任务：" + (tasks.length ? "\n" + tasks.map(formatTask).join("\n") : "无"));
+    var friendTasks = tasks.filter(function (task) { return !task.type || task.type === "friend_add"; });
+    var messageTasks = tasks.filter(function (task) { return task.type === "proactive_message"; });
+    ui.friendHistory.setText("最近任务：" + (friendTasks.length ? "\n" + friendTasks.map(formatTask).join("\n") : "无"));
+    ui.messageHistory.setText("最近消息任务：" + (messageTasks.length ? "\n" + messageTasks.map(formatTask).join("\n") : "无"));
     var logs = store.getLogs().slice(-15).reverse().map(function (entry) { return logger.format(entry); });
     ui.logText.setText(logs.length ? logs.join("\n") : "暂无日志");
   }
@@ -355,6 +437,32 @@
     ui.friendProfileResult.setText("正在读取当前好友资料……");
     refresh();
   });
+  ui.messageSearchButton.on("click", function () {
+    var target = textOf(ui.messageTarget);
+    var message = textOf(ui.messageText);
+    if (!target || !message) {
+      ui.messageResult.setText("完整备注名/微信号和消息内容不能为空");
+      return;
+    }
+    startWorker();
+    writeCommand("proactive_message_search", { target: target, message: message });
+    ui.messageConfirmButton.setEnabled(false);
+    ui.messageResult.setText("正在定位好友……");
+    refresh();
+  });
+  ui.messageConfirmButton.on("click", function () {
+    var pending = store.getRuntime().pendingProactiveMessageTaskId;
+    if (!pending) { ui.messageResult.setText("没有待确认的消息任务"); return; }
+    writeCommand("proactive_message_confirm", { taskId: pending });
+    ui.messageConfirmButton.setEnabled(false);
+    ui.messageResult.setText("正在发送消息……");
+  });
+  ui.messageCancelButton.on("click", function () {
+    var pending = store.getRuntime().pendingProactiveMessageTaskId;
+    if (pending) writeCommand("proactive_message_cancel", { taskId: pending });
+    ui.messageConfirmButton.setEnabled(false);
+    ui.messageResult.setText("已取消");
+  });
   ui.friendConfirmButton.on("click", function () {
     var pending = store.getRuntime().pendingFriendTaskId;
     if (!pending) { ui.friendResult.setText("没有待确认的搜索结果"); return; }
@@ -368,6 +476,8 @@
     ui.friendConfirmButton.setEnabled(false);
     ui.friendResult.setText("已取消");
   });
+  ui.mqttSaveButton.on("click", saveMqttConfig);
+  ui.mqttToggleButton.on("click", toggleMqtt);
   ui.replySaveButton.on("click", saveReplyRule);
   ui.badgeScanOnlyButton.on("click", function () { applyBadgeScanOnly(!badgeScanOnly); });
 
@@ -377,6 +487,13 @@
   ui.listenMode.setText(initialConfig.privateChat.listenMode || "whitelist");
   ui.whitelistInput.setText((initialConfig.privateChat.whitelist || []).join(","));
   ui.blacklistInput.setText((initialConfig.privateChat.blacklist || []).join(","));
+  var initialMqtt = initialConfig.mqtt || {};
+  ui.mqttServer.setText(initialMqtt.serverUri || "");
+  ui.mqttClientId.setText(initialMqtt.clientId || "");
+  ui.mqttUsername.setText(initialMqtt.username || "");
+  ui.mqttPassword.setText(initialMqtt.password || "");
+  ui.mqttCommandTopic.setText(initialMqtt.commandTopic || "wxbot/{clientId}/command");
+  ui.mqttEventTopic.setText(initialMqtt.eventTopic || "wxbot/{clientId}/event");
   if (initialConfig.replyRules && initialConfig.replyRules[0]) {
     ui.replyKeyword.setText(initialConfig.replyRules[0].keyword || "");
     ui.replyText.setText(initialConfig.replyRules[0].reply || "");

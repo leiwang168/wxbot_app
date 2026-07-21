@@ -38,7 +38,7 @@
   FriendAddFlow.prototype._todayCount = function () {
     var today = dayKey(this.clock());
     return this.store.getTasks().filter(function (task) {
-      return dayKey(task.attemptedAt || task.createdAt) === today && ["sent", "submitting", "rate_limited", "failed"].indexOf(task.status) >= 0;
+      return (!task.type || task.type === "friend_add") && dayKey(task.attemptedAt || task.createdAt) === today && ["sent", "submitting", "rate_limited", "failed"].indexOf(task.status) >= 0;
     }).length;
   };
 
@@ -61,6 +61,7 @@
   FriendAddFlow.prototype._newTask = function (payload) {
     return {
       id: uuid(),
+      type: "friend_add",
       target: String(payload.target || "").trim(),
       verifyText: String(payload.verifyText || ""),
       remark: String(payload.remark || ""),

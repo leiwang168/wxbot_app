@@ -1225,6 +1225,110 @@
     return { ok: true, chatName: resolvedChatName, text: latest.text, direction: latest.direction, observedAt: Date.now() };
   };
 
+  Adapter.prototype._findExactTextNode = function (value) {
+    var expected = this._normalizeUiText(value);
+    if (!expected) return null;
+    var selector = this._selector("text", expected);
+    var nodes = this._findAll(selector);
+    var size = Math.min(this._collectionSize(nodes), 2000);
+    var candidates = [];
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      var description = this._normalizeUiText(this._nodeDescription(node));
+      var className = this._nodeClassName(node);
+      if (text !== expected && description !== expected) continue;
+      // Do not click the search input itself when its current value equals the target.
+      if (/EditText/i.test(className)) continue;
+      var bounds = this._uiBoundsMeta(node);
+      candidates.push({ node: node, bounds: bounds, clickable: this._nodeClickable(node) });
+    }
+    candidates.sort(function (a, b) {
+      return (a.clickable ? 0 : 1) - (b.clickable ? 0 : 1) ||
+        ((a.bounds && a.bounds.top) || 0) - ((b.bounds && b.bounds.top) || 0);
+    });
+    if (candidates.length) return candidates[0].node;
+    var fallback = this._findOne(selector, 1800);
+    if (fallback && /EditText/i.test(this._nodeClassName(fallback))) return null;
+    return fallback;
+  };
+
+  Adapter.prototype._clickSearchResult = function (node) {
+    var target = node;
+    for (var level = 0; level < 8 && target; level += 1) {
+      if (this._click(target)) {
+        this._sleep(700);
+        if (this.isChatScreen()) return { ok: true, ancestorLevel: level };
+      }
+      try {
+        target = target.parent && typeof target.parent === "function" ? target.parent() : null;
+      } catch (ignoreParent) {
+        target = null;
+      }
+    }
+    return { ok: false, code: "SEARCH_RESULT_CLICK_FAILED" };
+  };
+
+  Adapter.prototype.openChatByTarget = function (target) {
+    var expected = this._normalizeUiText(target);
+    if (!expected) return { ok: false, code: "TARGET_REQUIRED" };
+    this._log("action", "按完整备注名或微信号定位微信好友", { target: expected });
+    if (!this.isWechatForeground()) {
+      var launched = this.launch();
+      if (!launched || !launched.ok) return launched || { ok: false, code: "WECHAT_LAUNCH_FAILED" };
+    }
+    var list = this.openConversationList();
+    if (!list || !list.ok) return list || { ok: false, code: "CONVERSATION_LIST_NOT_FOUND" };
+    var input = this._findInput(0, 3000);
+    if (!input) return { ok: false, code: "CONTACT_SEARCH_INPUT_NOT_FOUND" };
+    if (!this._setText(input, expected)) return { ok: false, code: "CONTACT_SEARCH_INPUT_FAILED" };
+    var search = this._findFirstByTexts(["搜索"], 1500);
+    if (search) {
+      if (!this._click(search)) return { ok: false, code: "CONTACT_SEARCH_BUTTON_CLICK_FAILED" };
+    } else {
+      try {
+        if (typeof press !== "function") return { ok: false, code: "CONTACT_SEARCH_BUTTON_NOT_FOUND" };
+        press(66);
+      } catch (error) {
+        return { ok: false, code: "CONTACT_SEARCH_SUBMIT_FAILED", error: String(error) };
+      }
+    }
+    this._sleep(1000);
+    if (this.isRateLimited()) return { ok: false, code: "WECHAT_RATE_LIMITED" };
+    if (this._findFirstByTexts(["无结果", "不存在", "找不到", "没有找到"], 600)) {
+      return { ok: false, code: "CONTACT_NOT_FOUND" };
+    }
+    var resultNode = this._findExactTextNode(expected);
+    if (!resultNode) return { ok: false, code: "CONTACT_NOT_FOUND" };
+    var clicked = this._clickSearchResult(resultNode);
+    if (!clicked || !clicked.ok) return clicked || { ok: false, code: "SEARCH_RESULT_CLICK_FAILED" };
+    if (!this.isChatScreen()) {
+      var messageButton = this._findFirstByTexts(["发消息", "发消息给他"], 1800);
+      if (messageButton && this._click(messageButton)) this._sleep(800);
+    }
+    if (!this.isChatScreen()) return { ok: false, code: "CONTACT_CHAT_NOT_OPENED" };
+    var chatName = this.readCurrentChatName ? this.readCurrentChatName() : "";
+    if (this._isEllipsizedChatName(chatName) && this.readCurrentChatRemark) {
+      var fullName = this.readCurrentChatRemark(chatName);
+      if (fullName && fullName.ok && fullName.chatName) chatName = fullName.chatName;
+    }
+    this._log("info", "已打开指定好友聊天", { target: expected, chatName: chatName });
+    return { ok: true, target: expected, chatName: chatName, matchedName: chatName };
+  };
+
+  Adapter.prototype.verifyCurrentChatTarget = function (target, expectedName) {
+    if (!this.isChatScreen()) return { ok: false, code: "CHAT_SCREEN_REQUIRED" };
+    var currentName = this._normalizeUiText(this.readCurrentChatName ? this.readCurrentChatName() : "");
+    var expected = this._normalizeUiText(expectedName);
+    var requested = this._normalizeUiText(target);
+    if (!currentName) return { ok: false, code: "CHAT_NAME_NOT_FOUND" };
+    if (currentName === expected || currentName === requested) {
+      return { ok: true, chatName: currentName };
+    }
+    this._log("warn", "主动发消息确认时聊天对象已变化", { target: requested, expectedName: expected, currentName: currentName });
+    return { ok: false, code: "CHAT_TARGET_CHANGED", chatName: currentName };
+  };
+
   Adapter.prototype.sendText = function (text) {
     this._log("action", "发送微信私聊回复", { text: text });
     var input = this._findChatInput(2000);

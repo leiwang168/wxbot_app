@@ -9,6 +9,7 @@
     "manifestPermissions": [
       "android.permission.WRITE_EXTERNAL_STORAGE",
       "android.permission.READ_EXTERNAL_STORAGE",
+      "android.permission.INTERNET",
       "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
     ],
     "requestListOnStartup": [

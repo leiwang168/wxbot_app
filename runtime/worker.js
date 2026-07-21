@@ -13,6 +13,9 @@
   var Controller = require("./controller").Controller;
   var Adapter = require("../wechat/adapter").Adapter;
   var FriendAddFlow = require("../wechat/friend_add_flow").FriendAddFlow;
+  var ProactiveMessageFlow = require("../wechat/proactive_message_flow").ProactiveMessageFlow;
+  var MqttClient = require("../mqtt/client").MqttClient;
+  var parseMqttCommand = require("../mqtt/client").parseCommand;
   var screenshot = require("../diagnostics/screenshot");
 
   var store = new Store("wxbot.app.v1", defaults, migrations);
@@ -26,6 +29,15 @@
   var controller = new Controller({ store: store, logger: logger, queue: queue, machine: machine });
   var dedupe = new Dedupe(store, 60000);
   var friendFlow = new FriendAddFlow({ store: store, adapter: adapter, logger: logger, screenshot: screenshot });
+  var proactiveMessageFlow = new ProactiveMessageFlow({ store: store, adapter: adapter, logger: logger, screenshot: screenshot });
+  var mqttClient = new MqttClient({
+    getConfig: function () { return store.loadConfig().mqtt || {}; },
+    logger: logger,
+    onEvent: function (event) {
+      store.setRuntime({ mqttLastEvent: event, mqttLastEventAt: event.at });
+      if (["connected", "subscribed"].indexOf(event.type) >= 0) publishMqttEvent(event.type, event.meta || {});
+    }
+  });
   var processedCommandId = "";
   var lastChatPollAt = 0;
   var workerTimer = null;
@@ -84,7 +96,7 @@
 
   function updateCounters(patch) {
     var runtime = store.getRuntime();
-    var counters = runtime.counters || { repliesToday: 0, friendAddsToday: 0 };
+    var counters = runtime.counters || { repliesToday: 0, friendAddsToday: 0, proactiveMessagesToday: 0 };
     Object.keys(patch || {}).forEach(function (key) { counters[key] = Number(counters[key] || 0) + Number(patch[key] || 0); });
     store.setRuntime({ counters: counters });
   }
@@ -97,6 +109,7 @@
       if (runtime.workerOwnerId === workerId) store.setRuntime({ workerOwnerId: "", workerLeaseUntil: 0, workerStoppedAt: Date.now() });
     } catch (ignoreRelease) {}
     if (reason) logger.detail("工作进程结束", { reason: reason, workerId: workerId });
+    try { mqttClient.stop(); } catch (ignoreMqttStop) {}
     try { if (workerTimer && typeof clearInterval === "function") clearInterval(workerTimer); } catch (ignoreTimer) {}
     try { if (typeof exit === "function") exit(); } catch (ignoreExit) {}
     try {
@@ -265,43 +278,97 @@
     }
   }
 
-  function processCommand(command) {
-    if (!command || !command.id || command.id === processedCommandId) return;
+  function mqttSafeResult(result) {
+    var safe = result;
+    try { safe = JSON.parse(JSON.stringify(result || {})); } catch (ignoreClone) {}
+    if (safe && safe.task && safe.task.message) {
+      safe.task.message = "[已隐藏:" + String(safe.task.message).length + "字符]";
+    }
+    return safe;
+  }
+
+  function publishMqttEvent(event, payload) {
+    try { mqttClient.publishEvent(event, payload || {}); } catch (ignore) {}
+  }
+
+  function executeRuntimeCommand(command) {
+    var payload = command.payload || {};
+    var result;
+    logger.action("开始执行 runtime 命令", { commandType: command.type, commandId: command.id, source: command.source || "ui" });
+    try {
+      if (command.type === "add_friend_search") result = friendFlow.search(payload);
+      else if (command.type === "add_friend_confirm") result = friendFlow.confirm(payload.taskId);
+      else if (command.type === "add_friend_cancel") result = { ok: friendFlow.cancel(payload.taskId) };
+      else if (command.type === "proactive_message_search") result = proactiveMessageFlow.search(payload);
+      else if (command.type === "proactive_message_confirm") {
+        result = proactiveMessageFlow.confirm(payload.taskId);
+        if (result && result.ok) updateCounters({ proactiveMessagesToday: 1 });
+      } else if (command.type === "proactive_message_cancel") result = { ok: proactiveMessageFlow.cancel(payload.taskId) };
+      else if (command.type === "scan_wechat_badges") {
+        result = adapter.scanUnreadBadges ? adapter.scanUnreadBadges() : { ok: false, code: "BADGE_SCAN_API_UNAVAILABLE", clicked: false, badges: [] };
+      } else if (command.type === "read_current_friend_profile") {
+        result = adapter.readCurrentFriendProfile
+          ? adapter.readCurrentFriendProfile()
+          : { ok: false, code: "PROFILE_API_UNAVAILABLE" };
+      } else if (command.type === "reset_rate_limit") {
+        store.setRuntime({ friendRateLimitedUntil: 0, friendRateLimitReason: "" });
+        logger.info("已手动清除主动添加冷却");
+        result = { ok: true };
+      } else if (command.type === "stop_worker") {
+        result = { ok: controller.stop() };
+      } else result = { ok: false, errorCode: "UNKNOWN_COMMAND" };
+    } catch (error) {
+      result = { ok: false, errorCode: "COMMAND_EXCEPTION", error: String(error) };
+      logger.error("runtime 命令异常", result);
+    }
+    logger.action("runtime 命令执行完成", { commandType: command.type, commandId: command.id, ok: !!(result && result.ok), errorCode: result && result.errorCode || "", source: command.source || "ui" });
+    store.setRuntime({
+      commandResult: { id: command.id, type: command.type, result: result, finishedAt: Date.now(), source: command.source || "ui" },
+      command: command.source === "mqtt" ? store.getRuntime().command : null
+    });
+    if (command.source === "mqtt") {
+      publishMqttEvent("command_result", {
+        commandId: command.id,
+        commandType: command.type,
+        ok: !!(result && result.ok),
+        result: mqttSafeResult(result)
+      });
+    }
+    if (command.type === "stop_worker") stopSelf("runtime_command_stop");
+    return result;
+  }
+
+  function enqueueRuntimeCommand(command) {
+    if (!command || !command.id || command.id === processedCommandId) return false;
     processedCommandId = command.id;
     var payload = command.payload || {};
-    logger.detail("收到 runtime 命令并加入串行队列", { commandType: command.type, commandId: command.id });
-    controller.enqueue(command.type, function () {
-      var result;
-      logger.action("开始执行 runtime 命令", { commandType: command.type, commandId: command.id });
-      try {
-        if (command.type === "add_friend_search") result = friendFlow.search(payload);
-        else if (command.type === "add_friend_confirm") result = friendFlow.confirm(payload.taskId);
-        else if (command.type === "add_friend_cancel") result = { ok: friendFlow.cancel(payload.taskId) };
-        else if (command.type === "scan_wechat_badges") {
-          result = adapter.scanUnreadBadges ? adapter.scanUnreadBadges() : { ok: false, code: "BADGE_SCAN_API_UNAVAILABLE", clicked: false, badges: [] };
-        } else if (command.type === "read_current_friend_profile") {
-          result = adapter.readCurrentFriendProfile
-            ? adapter.readCurrentFriendProfile()
-            : { ok: false, code: "PROFILE_API_UNAVAILABLE" };
-        } else if (command.type === "reset_rate_limit") {
-          store.setRuntime({ friendRateLimitedUntil: 0, friendRateLimitReason: "" });
-          logger.info("已手动清除主动添加冷却");
-          result = { ok: true };
-        } else if (command.type === "stop_worker") {
-          result = { ok: controller.stop() };
-        } else result = { ok: false, errorCode: "UNKNOWN_COMMAND" };
-      } catch (error) {
-        result = { ok: false, errorCode: "COMMAND_EXCEPTION", error: String(error) };
-        logger.error("runtime 命令异常", result);
+    logger.detail("收到 runtime 命令并加入串行队列", { commandType: command.type, commandId: command.id, source: command.source || "ui" });
+    controller.enqueue(command.type, function () { executeRuntimeCommand(command); }, payload);
+    return true;
+  }
+
+  function processCommand(command) {
+    enqueueRuntimeCommand(command);
+  }
+
+  function processMqttMessages() {
+    var config = store.loadConfig().mqtt || {};
+    mqttClient.drainMessages(5, function (item) {
+      var parsed = parseMqttCommand(item, config.allowedCommands || []);
+      if (!parsed.ok) {
+        logger.warn("忽略 MQTT 非法命令", { code: parsed.code, topic: item.topic });
+        publishMqttEvent("command_rejected", { topic: item.topic, code: parsed.code, type: parsed.type || "" });
+        return;
       }
-      logger.action("runtime 命令执行完成", { commandType: command.type, commandId: command.id, ok: !!(result && result.ok), errorCode: result && result.errorCode || "" });
-      store.setRuntime({ commandResult: { id: command.id, type: command.type, result: result, finishedAt: Date.now() }, command: null });
-      if (command.type === "stop_worker") stopSelf("runtime_command_stop");
-    }, payload);
+      enqueueRuntimeCommand(parsed.command);
+    });
   }
 
   function tick() {
     try {
+      mqttClient.tick();
+      store.setRuntime({ mqtt: mqttClient.status() });
+      processMqttMessages();
       processCommand(store.getRuntime().command);
       var drained = controller.tick();
       if (drained > 0) logger.detail("worker 处理串行任务", { drained: drained, queueSize: queue.size() });
@@ -322,6 +389,13 @@
       return false;
     }
     if (machine.state === "STOPPED" || machine.state === "ERROR") controller.start();
+    try {
+      var mqttStart = mqttClient.start();
+      store.setRuntime({ mqtt: mqttClient.status() });
+      if (mqttStart && mqttStart.ok && !mqttStart.disabled) publishMqttEvent("worker_status", { state: "MONITORING", workerId: workerId });
+    } catch (mqttError) {
+      logger.error("MQTT 启动失败", { error: String(mqttError) });
+    }
     try {
       if (typeof events !== "undefined" && events.observeNotification && !tryStart.notificationObserved) {
         events.observeNotification();
@@ -360,10 +434,14 @@
       if (workerStopped) return;
       var currentConfig = store.loadConfig();
       if (!currentConfig.enabled) {
+        try { mqttClient.stop(); } catch (ignoreMqttStopOnDisable) {}
         if (machine.state !== "STOPPED") controller.stop();
         stopSelf("config_disabled");
         return;
       }
+      mqttClient.tick();
+      store.setRuntime({ mqtt: mqttClient.status() });
+      processMqttMessages();
       var drained = controller.tick();
       if (drained > 0) logger.detail("worker 处理串行任务", { drained: drained, queueSize: queue.size() });
       if (Date.now() - lastChatPollAt >= 2000) {
