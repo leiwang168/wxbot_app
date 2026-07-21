@@ -229,6 +229,28 @@ test("wechat long conversation name is recognized as ellipsized", function () {
   assert.strictEqual(adapter._isEllipsizedChatName("磊哥年轻牛逼威武霸气帅气-1又长备注"), false);
 });
 
+test("wechat profile locators select the top-right more button and info avatar", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  var more = {
+    text: function () { return ""; },
+    desc: function () { return "more"; },
+    className: function () { return "android.widget.ImageButton"; },
+    clickable: function () { return true; },
+    bounds: function () { return { left: 1000, top: 40, right: 1060, bottom: 100 }; }
+  };
+  var avatar = {
+    text: function () { return ""; },
+    desc: function () { return ""; },
+    className: function () { return "android.widget.ImageView"; },
+    bounds: function () { return { left: 40, top: 220, right: 160, bottom: 340 }; }
+  };
+  adapter.isChatScreen = function () { return true; };
+  adapter._selector = function () { return {}; };
+  adapter._findAll = function () { return [more, avatar]; };
+  assert.strictEqual(adapter._findChatMoreButton(), more);
+  assert.strictEqual(adapter._findChatInfoAvatar("Alice"), avatar);
+});
+
 test("wechat latest-message resolves a full remark after list truncation", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
   adapter.readCurrentChatRemark = function () {
@@ -244,26 +266,32 @@ test("wechat latest-message resolves a full remark after list truncation", funct
   assert.strictEqual(result.chatName, "磊哥年轻牛逼威武霸气帅气-1又长备注");
 });
 
-test("wechat full remark navigation returns to the chat page", function () {
+test("wechat full remark navigation uses more and chat info avatar", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
-  var title = {};
-  var setting = {};
+  var page = "chat";
   var clicks = [];
   var backCount = 0;
-  var pageIndex = 0;
-  adapter.isChatScreen = function () { return true; };
-  adapter._collectCurrentChatTitleCandidates = function () { return [{ node: title, text: "磊哥年轻牛逼威武霸气帅气-1..." }]; };
-  adapter._click = function (node) { clicks.push(node); return true; };
-  adapter._readContactRemarkPage = function () {
-    pageIndex += 1;
-    return pageIndex === 1 ? { settingButton: setting } : { chatName: "磊哥年轻牛逼威武霸气帅气-1又长备注", source: "remark_editor" };
+  var more = { name: "more" };
+  var avatar = { name: "avatar" };
+  adapter.isChatScreen = function () { return page === "chat"; };
+  adapter._collectCurrentChatTitleCandidates = function () { return [{ node: { name: "title" }, text: "LongRemark..." }]; };
+  adapter._findChatMoreButton = function () { return more; };
+  adapter._findChatInfoAvatar = function () { return avatar; };
+  adapter._findFirstByTexts = function () { return { name: "chat-info-title" }; };
+  adapter._click = function (node) {
+    clicks.push(node.name);
+    if (node === more) page = "chat-info";
+    if (node === avatar) page = "profile";
+    return true;
   };
+  adapter._readWechatIdFromCurrentPage = function () { return { ok: true, wechatId: "wxid_long" }; };
+  adapter._readRemarkNameFromCurrentPage = function () { return { ok: true, chatName: "LongRemarkFull", source: "remark_adjacent" }; };
   adapter._sleep = function () {};
-  adapter.goHome = function () { backCount += 1; return { ok: true }; };
-  var result = adapter.readCurrentChatRemark("磊哥年轻牛逼威武霸气帅气-1...");
+  adapter.goHome = function () { backCount += 1; page = backCount === 1 ? "chat-info" : "chat"; return { ok: true }; };
+  var result = adapter.readCurrentChatRemark("LongRemark...");
   assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.chatName, "磊哥年轻牛逼威武霸气帅气-1又长备注");
-  assert.strictEqual(clicks.length, 2);
+  assert.strictEqual(result.chatName, "LongRemarkFull");
+  assert.deepStrictEqual(clicks, ["more", "avatar"]);
   assert.strictEqual(backCount, 2);
 });
 
@@ -299,47 +327,59 @@ test("wechat profile reports a stable error when WeChat ID is absent", function 
   assert.strictEqual(result.code, "WECHAT_ID_NOT_FOUND");
 });
 
-test("wechat profile uses the current chat title and returns to that chat", function () {
+test("wechat profile reads remark and WeChat ID through chat info avatar", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
-  var enteredProfile = false;
-  var returned = 0;
-  var title = { text: function () { return "磊哥TS"; }, bounds: function () { return { left: 380, top: 90, right: 700, bottom: 150 }; }, click: function () { enteredProfile = true; return true; } };
-  var profileNodes = [
-    { text: function () { return "微信号"; }, bounds: function () { return { left: 300, top: 500, right: 420, bottom: 550 }; } },
-    { text: function () { return "wxid_leige"; }, bounds: function () { return { left: 440, top: 500, right: 700, bottom: 550 }; } }
-  ];
-  adapter.isChatScreen = function () { return !enteredProfile; };
-  adapter._selector = function (kind) {
-    return { find: function () { return kind === "className" ? [title] : profileNodes; } };
+  var page = "chat";
+  var backCount = 0;
+  var clicks = [];
+  var more = { name: "more" };
+  var avatar = { name: "avatar" };
+  adapter.isChatScreen = function () { return page === "chat"; };
+  adapter._collectCurrentChatTitleCandidates = function () { return [{ node: { name: "title" }, text: "AliceRemark" }]; };
+  adapter._findChatMoreButton = function () { return more; };
+  adapter._findChatInfoAvatar = function () { return avatar; };
+  adapter._findFirstByTexts = function () { return { name: "chat-info-title" }; };
+  adapter._click = function (node) {
+    clicks.push(node.name);
+    if (node === more) page = "chat-info";
+    if (node === avatar) page = "profile";
+    return true;
   };
+  adapter._readWechatIdFromCurrentPage = function () { return { ok: true, wechatId: "wxid_alice", source: "adjacent" }; };
+  adapter._readRemarkNameFromCurrentPage = function () { return { ok: true, chatName: "AliceRemarkFull", source: "remark_adjacent" }; };
   adapter._sleep = function () {};
-  adapter.goHome = function () { returned += 1; enteredProfile = false; return { ok: true }; };
+  adapter.goHome = function () { backCount += 1; page = backCount === 1 ? "chat-info" : "chat"; return { ok: true }; };
   var result = adapter.readCurrentFriendProfile();
   assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.chatName, "磊哥TS");
-  assert.strictEqual(result.wechatId, "wxid_leige");
-  assert.strictEqual(returned, 1);
+  assert.strictEqual(result.chatName, "AliceRemarkFull");
+  assert.strictEqual(result.remarkName, "AliceRemarkFull");
+  assert.strictEqual(result.wechatId, "wxid_alice");
+  assert.deepStrictEqual(clicks, ["more", "avatar"]);
+  assert.strictEqual(backCount, 2);
 });
 
-
-
-test("wechat profile returns after a missing WeChat ID", function () {
+test("wechat profile returns to chat after missing WeChat ID", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
-  var enteredProfile = false;
-  var returned = 0;
-  var title = { text: function () { return "当前好友"; }, bounds: function () { return { left: 380, top: 90, right: 700, bottom: 150 }; }, click: function () { enteredProfile = true; return true; } };
-  var profileNodes = [{ text: function () { return "地区"; }, bounds: function () { return { left: 300, top: 500, right: 700, bottom: 550 }; } }];
-  adapter.isChatScreen = function () { return !enteredProfile; };
-  adapter._selector = function (kind) {
-    return { find: function () { return kind === "className" ? [title] : profileNodes; } };
-  };
+  var page = "chat";
+  var backCount = 0;
+  var more = { name: "more" };
+  var avatar = { name: "avatar" };
+  adapter.isChatScreen = function () { return page === "chat"; };
+  adapter._collectCurrentChatTitleCandidates = function () { return [{ node: { name: "title" }, text: "Alice" }]; };
+  adapter._findChatMoreButton = function () { return more; };
+  adapter._findChatInfoAvatar = function () { return avatar; };
+  adapter._findFirstByTexts = function () { return { name: "chat-info-title" }; };
+  adapter._click = function (node) { if (node === more) page = "chat-info"; if (node === avatar) page = "profile"; return true; };
+  adapter._readWechatIdFromCurrentPage = function () { return { ok: false, code: "WECHAT_ID_NOT_FOUND" }; };
+  adapter._readRemarkNameFromCurrentPage = function () { return { ok: true, chatName: "AliceFull", source: "profile_visible_name" }; };
   adapter._sleep = function () {};
-  adapter.goHome = function () { returned += 1; enteredProfile = false; return { ok: true }; };
+  adapter.goHome = function () { backCount += 1; page = backCount === 1 ? "chat-info" : "chat"; return { ok: true }; };
   var result = adapter.readCurrentFriendProfile();
   assert.strictEqual(result.ok, false);
   assert.strictEqual(result.code, "WECHAT_ID_NOT_FOUND");
-  assert.strictEqual(result.chatName, "当前好友");
-  assert.strictEqual(returned, 1);
+  assert.strictEqual(result.chatName, "AliceFull");
+  assert.strictEqual(result.remarkName, "AliceFull");
+  assert.strictEqual(backCount, 2);
 });
 
 test("active friend add flow requires confirmation and records sent task", function () {

@@ -893,132 +893,237 @@
     return text.slice(-3) === "..." || text.slice(-1) === String.fromCharCode(8230);
   };
 
-  Adapter.prototype._readRemarkEditorText = function () {
-    var selector = this._selector("className", "android.widget.EditText");
-    var nodes = selector && selector.find ? selector.find() : null;
-    var size = Math.min(this._collectionSize(nodes), 20);
-    var ignored = ["搜索", "请输入备注", "设置备注和标签"];
-    for (var i = 0; i < size; i += 1) {
-      var node = this._collectionGet(nodes, i);
-      var text = this._normalizeUiText(this._nodeText(node));
-      if (!text || ignored.indexOf(text) >= 0) continue;
-      return text;
-    }
-    return "";
-  };
-
-  Adapter.prototype._readVisibleContactName = function () {
-    var selector = this._selector("className", "android.widget.TextView");
-    var nodes = selector && selector.find ? selector.find() : null;
+  Adapter.prototype._findChatMoreButton = function () {
+    if (!this.isChatScreen()) return null;
+    var selector = this._selector("classNameMatches", ".+");
+    var nodes = this._findAll(selector);
     var size = Math.min(this._collectionSize(nodes), 2000);
+    var screenWidth = (typeof device !== "undefined" && device.width) ? Number(device.width) : 1080;
     var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
-    var ignored = ["微信", "通讯录", "发现", "我", "返回", "搜索", "关闭", "聊天信息", "发消息", "视频通话", "音视频通话", "设置备注和标签", "微信号", "手机号", "地区", "个性签名", "更多", "发送", "置顶聊天", "消息免打扰", "查找聊天记录"];
     var candidates = [];
     for (var i = 0; i < size; i += 1) {
       var node = this._collectionGet(nodes, i);
-      var text = this._normalizeUiText(this._nodeText(node));
-      if (!text || ignored.indexOf(text) >= 0 || /^微信号\s*[:：]/.test(text)) continue;
-      if (/^\d+$/.test(text) || this._isChatTimestampText(text)) continue;
-      if (this._isEllipsizedChatName(text) || text.length > 80) continue;
       var bounds = this._uiBoundsMeta(node);
-      if (!bounds || bounds.top > screenHeight * 0.42) continue;
-      candidates.push({ text: text, bounds: bounds });
+      if (!bounds || bounds.top > screenHeight * 0.18 || bounds.centerX < screenWidth * 0.68) continue;
+      var text = this._normalizeUiText(this._nodeText(node));
+      var description = this._normalizeUiText(this._nodeDescription(node));
+      var resourceName = this._normalizeUiText(this._nodeResourceName(node));
+      var className = this._nodeClassName(node);
+      var semanticText = text + " " + description + " " + resourceName;
+      var semantic = semanticText.indexOf("更多") >= 0 || semanticText.match(/more|menu|overflow|ellipsis|option/i);
+      var clickable = this._nodeClickable(node);
+      var smallEnough = bounds.right - bounds.left <= screenWidth * 0.25 && bounds.bottom - bounds.top <= screenHeight * 0.14;
+      if (!semantic && !(clickable && smallEnough && bounds.centerX > screenWidth * 0.82)) continue;
+      candidates.push({
+        node: node,
+        bounds: bounds,
+        semantic: !!semantic,
+        clickable: clickable,
+        text: text,
+        description: description,
+        resourceName: resourceName,
+        className: className
+      });
     }
     candidates.sort(function (a, b) {
-      return b.text.length - a.text.length || a.bounds.top - b.bounds.top;
+      return (a.semantic ? 0 : 1) - (b.semantic ? 0 : 1) ||
+        (b.bounds.centerX - a.bounds.centerX) ||
+        (a.bounds.top - b.bounds.top);
     });
-    return candidates.length ? candidates[0].text : "";
+    if (candidates.length) {
+      this._detail("已定位微信聊天页面右上角更多按钮", {
+        candidateCount: candidates.length,
+        selected: {
+          text: candidates[0].text,
+          description: candidates[0].description,
+          resourceName: candidates[0].resourceName,
+          className: candidates[0].className,
+          bounds: candidates[0].bounds
+        }
+      });
+      return candidates[0].node;
+    }
+    this._detail("未定位到微信聊天页面右上角更多按钮", { candidateCount: 0 });
+    return null;
   };
 
-  Adapter.prototype._findChatInfoMember = function (chatName) {
-    var expected = this._normalizeUiText(chatName);
-    if (expected) {
-      var exact = this._findFirstByTexts([expected], 800);
-      if (exact) return exact;
-    }
-    var selector = this._selector("className", "android.widget.TextView");
-    var nodes = selector && selector.find ? selector.find() : null;
-    var size = Math.min(this._collectionSize(nodes), 1000);
+  Adapter.prototype._findChatInfoAvatar = function (chatName) {
+    var selector = this._selector("classNameMatches", ".+");
+    var nodes = this._findAll(selector);
+    var size = Math.min(this._collectionSize(nodes), 2000);
+    var screenWidth = (typeof device !== "undefined" && device.width) ? Number(device.width) : 1080;
     var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
-    var ignored = ["聊天信息", "置顶聊天", "消息免打扰", "查找聊天记录", "设置备注和标签", "返回", "更多"];
+    var expected = this._normalizeUiText(chatName);
     var candidates = [];
     for (var i = 0; i < size; i += 1) {
       var node = this._collectionGet(nodes, i);
-      var text = this._normalizeUiText(this._nodeText(node));
-      if (!text || ignored.indexOf(text) >= 0 || /^\d+$/.test(text) || this._isChatTimestampText(text)) continue;
       var bounds = this._uiBoundsMeta(node);
-      if (!bounds || bounds.top > screenHeight * 0.48) continue;
+      if (!bounds || bounds.top < screenHeight * 0.08 || bounds.top > screenHeight * 0.55) continue;
+      if (bounds.bottom > screenHeight * 0.68 || bounds.centerX > screenWidth * 0.9) continue;
+      var width = bounds.right - bounds.left;
+      var height = bounds.bottom - bounds.top;
+      if (width < 30 || height < 30 || width > screenWidth * 0.5 || height > screenHeight * 0.35) continue;
+      var text = this._normalizeUiText(this._nodeText(node));
+      var description = this._normalizeUiText(this._nodeDescription(node));
+      var className = this._nodeClassName(node);
+      var resourceName = this._normalizeUiText(this._nodeResourceName(node));
+      var ancestors = this._ancestorTexts(node);
+      var ancestorText = ancestors.map(function (item) {
+        return (item.text || "") + " " + (item.description || "");
+      }).join(" ");
+      var isImage = /image|avatar/i.test(className + " " + resourceName);
+      var named = !!expected && (text === expected || description === expected || ancestorText.indexOf(expected) >= 0);
+      var clickable = this._nodeClickable(node);
+      var avatarArea = clickable && bounds.centerX < screenWidth * 0.65 && bounds.centerY < screenHeight * 0.45;
+      if (!isImage && !named && !avatarArea) continue;
+      candidates.push({
+        node: node,
+        bounds: bounds,
+        isImage: isImage,
+        named: named,
+        avatarArea: avatarArea,
+        text: text,
+        description: description,
+        resourceName: resourceName,
+        className: className
+      });
+    }
+    candidates.sort(function (a, b) {
+      return (a.named ? 0 : 1) - (b.named ? 0 : 1) ||
+        (a.isImage ? 0 : 1) - (b.isImage ? 0 : 1) ||
+        (a.avatarArea ? 0 : 1) - (b.avatarArea ? 0 : 1) ||
+        a.bounds.top - b.bounds.top ||
+        a.bounds.left - b.bounds.left;
+    });
+    if (candidates.length) {
+      this._detail("已定位微信聊天信息页好友头像", {
+        candidateCount: candidates.length,
+        selected: {
+          text: candidates[0].text,
+          description: candidates[0].description,
+          resourceName: candidates[0].resourceName,
+          className: candidates[0].className,
+          bounds: candidates[0].bounds
+        }
+      });
+      return candidates[0].node;
+    }
+    this._detail("未定位到微信聊天信息页好友头像", { chatName: expected, candidateCount: 0 });
+    return null;
+  };
+
+  Adapter.prototype._readRemarkNameFromCurrentPage = function (fallbackName) {
+    var selector = this._selector("classNameMatches", ".+");
+    var nodes = this._findAll(selector);
+    var size = Math.min(this._collectionSize(nodes), 2000);
+    var screenWidth = (typeof device !== "undefined" && device.width) ? Number(device.width) : 1080;
+    var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
+    var labels = [];
+    var candidates = [];
+    var ignored = ["微信", "通讯录", "发现", "我", "返回", "搜索", "关闭", "聊天信息", "发消息", "视频通话", "音视频通话", "设置备注和标签", "微信号", "手机号", "地区", "个性签名", "更多", "发送", "置顶聊天", "消息免打扰", "查找聊天记录", "备注", "备注名"];
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      var description = this._normalizeUiText(this._nodeDescription(node));
+      var bounds = this._uiBoundsMeta(node);
+      if (!text && !description) continue;
+      var inline = text.match(new RegExp("^" + "备注" + "\\s*:?\\s*(.+)$"));
+      if (inline && inline[1]) return { ok: true, chatName: this._normalizeUiText(inline[1]), source: "remark_inline" };
+      if (text === "备注名" || text === "备注" || description === "备注名" || description === "备注") {
+        labels.push({ node: node, bounds: bounds });
+        continue;
+      }
+      if (!text || ignored.indexOf(text) >= 0 || text.indexOf("微信号" + ":") === 0 || this._isChatTimestampText(text)) continue;
+      if (this._isEllipsizedChatName(text) || text.length > 80 || !bounds) continue;
+      if (bounds.top < screenHeight * 0.05 || bounds.top > screenHeight * 0.42) continue;
+      if (bounds.centerX < screenWidth * 0.1 || bounds.centerX > screenWidth * 0.9) continue;
       candidates.push({ node: node, text: text, bounds: bounds });
     }
+    for (var j = 0; j < labels.length; j += 1) {
+      var label = labels[j];
+      if (!label.bounds) continue;
+      var adjacent = [];
+      for (var k = 0; k < size; k += 1) {
+        var valueNode = this._collectionGet(nodes, k);
+        var valueText = this._normalizeUiText(this._nodeText(valueNode));
+        var valueBounds = this._uiBoundsMeta(valueNode);
+        if (!valueText || !valueBounds || valueText === "备注" || valueText === "备注名") continue;
+        if (this._isEllipsizedChatName(valueText) || valueText.length > 80) continue;
+        var sameRow = Math.abs(valueBounds.centerY - label.bounds.centerY) <= Math.max(30, screenHeight * 0.025);
+        var toRight = valueBounds.left >= label.bounds.right - 8;
+        if (!sameRow || !toRight) continue;
+        adjacent.push({ text: valueText, distance: valueBounds.left - label.bounds.right });
+      }
+      adjacent.sort(function (a, b) { return a.distance - b.distance; });
+      if (adjacent.length) return { ok: true, chatName: adjacent[0].text, source: "remark_adjacent" };
+    }
     candidates.sort(function (a, b) {
-      return Math.abs(a.bounds.centerY - b.bounds.centerY) || b.text.length - a.text.length;
+      return a.bounds.top - b.bounds.top ||
+        Math.abs(a.bounds.centerX - screenWidth / 2) - Math.abs(b.bounds.centerX - screenWidth / 2) ||
+        b.text.length - a.text.length;
     });
-    return candidates.length ? candidates[0].node : null;
+    if (candidates.length) return { ok: true, chatName: candidates[0].text, source: "profile_visible_name" };
+    var visibleName = this._readVisibleContactName();
+    if (visibleName) return { ok: true, chatName: visibleName, source: "contact_profile" };
+    this._detail("未读取到微信好友完整备注名", { fallbackName: this._normalizeUiText(fallbackName), candidateCount: candidates.length });
+    return { ok: false, code: "REMARK_NAME_NOT_FOUND" };
   };
 
-  Adapter.prototype._readContactRemarkPage = function () {
-    var editorText = this._readRemarkEditorText();
-    if (editorText && !this._isEllipsizedChatName(editorText)) {
-      return { chatName: editorText, source: "remark_editor" };
+  Adapter.prototype._readCurrentFriendProfileDetails = function (fallbackChatName) {
+    if (!this.isChatScreen()) return { ok: false, code: "CHAT_SCREEN_REQUIRED", chatName: String(fallbackChatName || "") };
+    var titleCandidates = this._collectCurrentChatTitleCandidates();
+    var chatName = this._normalizeUiText(fallbackChatName) || (titleCandidates.length ? titleCandidates[0].text : "");
+    if (!chatName) return { ok: false, code: "CHAT_NAME_NOT_FOUND" };
+    var navigationDepth = 0;
+    var result = { ok: false, code: "CHAT_MORE_BUTTON_NOT_FOUND", chatName: chatName };
+    try {
+      var moreButton = this._findChatMoreButton();
+      if (!moreButton || !this._click(moreButton)) {
+        this._detail("未定位到微信聊天页面右上角更多按钮", { chatName: chatName });
+        return result;
+      }
+      navigationDepth = 1;
+      this._sleep(700);
+      var infoTitle = this._findFirstByTexts(["聊天信息"], 1200);
+      if (!infoTitle) this._detail("未确认已进入微信聊天信息页面", { chatName: chatName });
+      var avatar = this._findChatInfoAvatar(chatName);
+      if (!avatar || !this._click(avatar)) {
+        result = { ok: false, code: "CHAT_INFO_AVATAR_CLICK_FAILED", chatName: chatName };
+        return result;
+      }
+      navigationDepth = 2;
+      this._sleep(800);
+      var profile = this._readWechatIdFromCurrentPage();
+      var remark = this._readRemarkNameFromCurrentPage(chatName);
+      var resolvedName = remark && remark.chatName ? remark.chatName : chatName;
+      result = {
+        ok: !!profile.ok,
+        code: profile.ok ? "" : (profile.code || "WECHAT_ID_NOT_FOUND"),
+        chatName: resolvedName,
+        remarkName: resolvedName,
+        wechatId: profile.wechatId || "",
+        wechatIdSource: profile.source || "",
+        remarkSource: remark && remark.source || ""
+      };
+      if (result.ok) this._log("info", "已读取微信好友完整备注名", { chatName: result.chatName, remarkName: result.remarkName, wechatId: result.wechatId });
+      else this._log("warn", "未读取到微信好友完整备注名", { chatName: result.chatName, remarkName: result.remarkName, code: result.code });
+      return result;
+    } catch (error) {
+      this._log("error", "读取微信完整备注名异常", { chatName: chatName, error: String(error) });
+      return { ok: false, code: "FRIEND_PROFILE_READ_FAILED", chatName: chatName, error: String(error) };
+    } finally {
+      for (var i = 0; i < navigationDepth; i += 1) this.goHome();
     }
-    var settingButton = this._findFirstByTexts(["设置备注和标签"], 800);
-    if (settingButton) return { settingButton: settingButton };
-    var visibleName = this._readVisibleContactName();
-    if (visibleName) return { chatName: visibleName, source: "contact_profile" };
-    return {};
   };
 
   Adapter.prototype.readCurrentChatRemark = function (chatName) {
-    if (!this.isChatScreen()) return { ok: false, code: "CHAT_SCREEN_REQUIRED", chatName: String(chatName || "") };
-    var titleCandidates = this._collectCurrentChatTitleCandidates();
-    var titleNode = titleCandidates.length ? titleCandidates[0].node : null;
-    if (!titleNode || !this._click(titleNode)) {
-      return { ok: false, code: "CHAT_TITLE_CLICK_FAILED", chatName: String(chatName || "") };
+    var result = this._readCurrentFriendProfileDetails(chatName);
+    if (result.remarkName && !this._isEllipsizedChatName(result.remarkName)) {
+      this._detail("已读取微信好友完整备注名", { chatName: result.remarkName, source: result.remarkSource || "profile" });
+      return { ok: true, chatName: result.remarkName, source: result.remarkSource || "profile" };
     }
-    this._sleep(700);
-    var depth = 1;
-    var memberClicked = false;
-    var settingClicked = false;
-    var resolved = "";
-    var source = "";
-    try {
-      for (var step = 0; step < 4; step += 1) {
-        var page = this._readContactRemarkPage();
-        if (page.chatName) {
-          resolved = page.chatName;
-          source = page.source || "contact_profile";
-          if (!this._isEllipsizedChatName(resolved)) break;
-        }
-        if (page.settingButton && !settingClicked) {
-          if (this._click(page.settingButton)) {
-            settingClicked = true;
-            depth += 1;
-            this._sleep(500);
-            continue;
-          }
-        }
-        if (!memberClicked) {
-          var member = this._findChatInfoMember(chatName || (titleCandidates[0] && titleCandidates[0].text) || "");
-          if (member && this._click(member)) {
-            memberClicked = true;
-            depth += 1;
-            this._sleep(700);
-            continue;
-          }
-        }
-        break;
-      }
-    } catch (error) {
-      this._detail("读取微信完整备注名异常", { error: String(error) });
-    } finally {
-      for (var i = 0; i < depth; i += 1) this.goHome();
-    }
-    if (resolved && !this._isEllipsizedChatName(resolved)) {
-      this._detail("已读取微信好友完整备注名", { chatName: resolved, source: source || "contact_profile" });
-      return { ok: true, chatName: resolved, source: source || "contact_profile" };
-    }
-    this._detail("未读取到微信好友完整备注名", { chatName: String(chatName || ""), resolved: resolved });
-    return { ok: false, code: "FULL_CHAT_NAME_NOT_FOUND", chatName: String(chatName || "") };
+    this._detail("未读取到微信好友完整备注名", { chatName: String(chatName || ""), code: result.code || "FULL_CHAT_NAME_NOT_FOUND" });
+    return { ok: false, code: result.code || "FULL_CHAT_NAME_NOT_FOUND", chatName: String(chatName || "") };
   };
 
   Adapter.prototype._readWechatIdFromCurrentPage = function () {
@@ -1065,30 +1170,7 @@
   };
 
   Adapter.prototype.readCurrentFriendProfile = function () {
-    if (!this.isChatScreen()) return { ok: false, code: "CHAT_SCREEN_REQUIRED" };
-    var titleCandidates = this._collectCurrentChatTitleCandidates();
-    var chatName = titleCandidates.length ? titleCandidates[0].text : "";
-    if (!chatName) return { ok: false, code: "CHAT_NAME_NOT_FOUND" };
-    var titleNode = titleCandidates[0].node;
-    if (!this._click(titleNode)) return { ok: false, code: "CHAT_TITLE_CLICK_FAILED", chatName: chatName };
-    this._sleep(700);
-    var navigationDepth = 1;
-    var profile = this._readWechatIdFromCurrentPage();
-    if (!profile.ok && !this.isChatScreen()) {
-      var member = this._findFirstByTexts([chatName], 1000);
-      if (member && this._click(member)) {
-        this._sleep(700);
-        navigationDepth = 2;
-        profile = this._readWechatIdFromCurrentPage();
-      }
-    }
-    for (var i = 0; i < navigationDepth; i += 1) this.goHome();
-    if (!profile.ok) {
-      this._log("warn", "读取好友微信号失败", { chatName: chatName, code: profile.code || "WECHAT_ID_NOT_FOUND" });
-      return { ok: false, code: profile.code || "WECHAT_ID_NOT_FOUND", chatName: chatName };
-    }
-    this._log("info", "已读取好友微信号", { chatName: chatName, wechatId: profile.wechatId });
-    return { ok: true, chatName: chatName, wechatId: profile.wechatId };
+    return this._readCurrentFriendProfileDetails("");
   };
   Adapter.prototype.readLatestMessage = function (chatName, options) {
     var resolvedChatName = String(chatName || "");
