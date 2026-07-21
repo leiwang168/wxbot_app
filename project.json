@@ -1,0 +1,27 @@
+{
+  "name": "wxbot_app",
+  "main": "main.js",
+  "ignore": ["build", "logs", "tests", "docs"],
+  "packageName": "com.wxbot.app",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "permissionConfig": {
+    "manifestPermissions": [
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+      "android.permission.READ_EXTERNAL_STORAGE",
+      "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+    ],
+    "requestListOnStartup": [
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+      "android.permission.READ_EXTERNAL_STORAGE"
+    ]
+  },
+  "launchConfig": {
+    "stableMode": true,
+    "splashText": "wxbot_app"
+  },
+  "optimization": {
+    "removeOpenCv": true,
+    "unusedResources": true
+  }
+}

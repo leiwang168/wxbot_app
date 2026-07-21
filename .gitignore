@@ -1,0 +1,11 @@
+# AutoX build output
+build/
+
+# Runtime-generated logs and local state
+logs/*.log
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
