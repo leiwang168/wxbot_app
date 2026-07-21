@@ -54,7 +54,7 @@ node tests/run_tests.js
 
 ## MQTT 集成
 
-仪表盘的“MQTT 远程控制与状态上报”区域用于配置 broker、唯一 `clientId`、认证信息和主题。配置保存后启用 MQTT，并启动自动化 worker；`mqtt/client.js` 使用 AutoX.js Rhino 可用的 Paho MQTT Android 客户端连接、订阅和发布。
+仪表盘的“MQTT 远程控制与状态上报”区域用于配置 broker、唯一 `clientId`、认证信息和主题。配置保存后启用 MQTT，并启动自动化 worker；`mqtt/client.js` 使用 AutoX.js Rhino 可用的 Paho Java 异步客户端连接、订阅和发布。
 
 - 命令主题：默认 `wxbot/{clientId}/command`；事件主题：默认 `wxbot/{clientId}/event`。
 - `{clientId}` 会替换为当前设备的 MQTT clientId；多个设备必须使用不同 clientId。

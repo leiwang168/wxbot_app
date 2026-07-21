@@ -56,9 +56,9 @@
       throw new Error("AutoX Rhino MQTT API unavailable");
     }
     importPackage(Packages["org.eclipse.paho.client.mqttv3"]);
-    importClass("org.eclipse.paho.android.service.MqttAndroidClient");
+    importClass("org.eclipse.paho.client.mqttv3.MqttAsyncClient");
     return {
-      MqttAndroidClient: MqttAndroidClient,
+      MqttAsyncClient: MqttAsyncClient,
       MqttConnectOptions: MqttConnectOptions,
       MqttCallbackExtended: MqttCallbackExtended,
       IMqttActionListener: IMqttActionListener
@@ -185,15 +185,11 @@
       this.nextConnectAt = now() + config.reconnectIntervalSec * 1000;
       return false;
     }
-    if (!this.context) {
-      this._setError("AutoX context 不可用", "MQTT_CONTEXT_UNAVAILABLE");
-      this.nextConnectAt = now() + config.reconnectIntervalSec * 1000;
-      return false;
-    }
     try {
       var api = this._api();
       this.subscriptionRequested = false;
-      this.client = new api.MqttAndroidClient(this.context, config.serverUri, this.clientId);
+      // Use the Java async client so AutoX child engines do not bind the Android MQTT service.
+      this.client = new api.MqttAsyncClient(config.serverUri, this.clientId, null);
       this.client.setCallback(new api.MqttCallbackExtended({
         connectComplete: function (reconnect, serverUri) {
           self.connecting = false;
@@ -264,8 +260,8 @@
     this.subscriptionRequested = false;
     this.client = null;
     if (!client) return true;
-    try { if (typeof client.close === "function") client.close(); } catch (ignoreClose) {}
     try { if (typeof client.disconnect === "function") client.disconnect(); } catch (ignoreDisconnect) {}
+    try { if (typeof client.close === "function") client.close(); } catch (ignoreClose) {}
     this._emit("disconnected", { reason: "stopped" });
     return true;
   };

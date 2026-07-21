@@ -52,8 +52,8 @@ test("mqtt client uses configured topics and drains inbound messages", function 
   FakeOptions.prototype.setUserName = function (value) { this.values.username = value; };
   FakeOptions.prototype.setPassword = function (value) { this.values.password = value; };
   FakeOptions.prototype.setWill = function () { this.values.will = Array.prototype.slice.call(arguments); };
-  function FakeClient(context, uri, id) {
-    this.context = context; this.uri = uri; this.id = id; this.published = [];
+  function FakeClient(uri, id, persistence) {
+    this.uri = uri; this.id = id; this.persistence = persistence; this.published = [];
     fake.client = this;
   }
   FakeClient.prototype.setCallback = function (callback) { this.callback = callback; };
@@ -64,9 +64,8 @@ test("mqtt client uses configured topics and drains inbound messages", function 
   FakeClient.prototype.disconnect = function () {};
   var events = [];
   var client = new MqttClient({
-    context: {},
     config: { enabled: true, serverUri: "tcp://broker:1883", clientId: "device-1", commandTopic: "in/{clientId}", eventTopic: "out/{clientId}", username: "u", password: "p" },
-    api: { MqttAndroidClient: FakeClient, MqttConnectOptions: FakeOptions, MqttCallbackExtended: function (value) { return value; }, IMqttActionListener: function (value) { return value; } },
+    api: { MqttAsyncClient: FakeClient, MqttConnectOptions: FakeOptions, MqttCallbackExtended: function (value) { return value; }, IMqttActionListener: function (value) { return value; } },
     onEvent: function (event) { events.push(event.type); }
   });
   assert.strictEqual(client.start().ok, true);
