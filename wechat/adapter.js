@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   "use strict";
 
   function Adapter(options) {
@@ -589,6 +589,61 @@
     return result;
   };
 
+  Adapter.prototype._readConversationNameForBadge = function (badge, screenWidth, screenHeight) {
+    var badgeBounds = this._uiBoundsMeta(badge);
+    var ignored = [
+      "微信", "通讯录", "发现", "我", "Windows 微信已登录", "浮窗", "聊天信息",
+      "返回", "搜索", "关闭", "发送", "更多", "语音", "表情"
+    ];
+    var isName = function (value) {
+      var text = String(value || "").trim();
+      if (!text || ignored.indexOf(text) >= 0) return false;
+      if (/^\d{1,4}\+?$/.test(text)) return false;
+      if (this._isChatTimestampText(text)) return false;
+      return text.length <= 80;
+    }.bind(this);
+
+    // Some WeChat versions expose the conversation row name on the badge's
+    // ancestor. Prefer that because it is already scoped to this chat row.
+    var ancestors = this._ancestorTexts(badge);
+    for (var a = 1; a < ancestors.length; a += 1) {
+      var ancestorText = ancestors[a].text || ancestors[a].description;
+      if (isName(ancestorText)) return this._normalizeUiText(ancestorText);
+    }
+    if (!badgeBounds) return "";
+
+    // In the conversation list, the remark is to the right of the avatar and
+    // vertically aligned with the avatar-side unread badge. The preview and
+    // timestamp are on another row / far to the right and are excluded.
+    var selector = this._selector("classNameMatches", ".+");
+    var nodes = this._findAll(selector);
+    var size = Math.min(this._collectionSize(nodes), 2000);
+    var candidates = [];
+    var maxDelta = Math.max(44, screenHeight * 0.03);
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      var description = this._normalizeUiText(this._nodeDescription(node));
+      var value = text || description;
+      if (!isName(value)) continue;
+      var bounds = this._uiBoundsMeta(node);
+      if (!bounds) continue;
+      if (Math.abs(bounds.centerY - badgeBounds.centerY) > maxDelta) continue;
+      if (bounds.left < screenWidth * 0.15 || bounds.centerX > screenWidth * 0.82) continue;
+      candidates.push({
+        text: value,
+        distance: Math.abs(bounds.centerY - badgeBounds.centerY),
+        left: bounds.left,
+        bounds: bounds
+      });
+    }
+    candidates.sort(function (a, b) {
+      return a.distance - b.distance || a.left - b.left;
+    });
+    var chosen = candidates.length ? candidates[0].text : "";
+    if (chosen) this._detail("读取微信聊天列表联系人备注名", { chatName: chosen, badgeBounds: badgeBounds });
+    return chosen;
+  };
   Adapter.prototype._isConversationListBadgeBounds = function (bounds, text, description, screenWidth, screenHeight) {
     if (!bounds) return true;
     if (bounds.centerY < screenHeight * 0.10 || bounds.centerY > screenHeight * 0.90) return false;
@@ -646,7 +701,8 @@
           className: this._nodeClassName(badge),
           resourceName: this._nodeResourceName(badge),
           clickable: this._nodeClickable(badge),
-          ancestors: this._ancestorTexts(badge)
+          ancestors: this._ancestorTexts(badge),
+          chatName: this._readConversationNameForBadge(badge, screenWidth, screenHeight)
         });
       }
     }
@@ -665,7 +721,8 @@
       className: candidate.className,
       resourceName: candidate.resourceName,
       clickable: candidate.clickable,
-      ancestors: candidate.ancestors
+      ancestors: candidate.ancestors,
+      chatName: candidate.chatName || ""
     };
   };
 
@@ -695,7 +752,7 @@
     }
   };
 
-  Adapter.prototype._openUnreadBadge = function (badge, source, screenWidth, screenHeight) {
+  Adapter.prototype._openUnreadBadge = function (badge, source, screenWidth, screenHeight, chatName) {
     var text = this._normalizeUiText(this._nodeText(badge));
     var description = this._normalizeUiText(this._nodeDescription(badge));
     var unreadCount = this._unreadCount(text, description);
@@ -708,8 +765,8 @@
       if (this._click(target)) {
         this._sleep(650);
         if (this.isChatScreen()) {
-          this._detail("已点击未读角标对应的聊天行", { source: source, ancestorLevel: level, unreadCount: unreadCount });
-          return { ok: true, unreadCount: unreadCount, clicked: true };
+          this._detail("已点击未读角标对应的聊天行", { source: source, ancestorLevel: level, unreadCount: unreadCount, chatName: chatName || "" });
+          return { ok: true, unreadCount: unreadCount, clicked: true, chatName: chatName || "" };
         }
       }
       try {
@@ -731,7 +788,7 @@
       var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
       var candidates = this._collectUnreadBadgeCandidates(screenWidth, screenHeight);
       for (var c = 0; c < candidates.length; c += 1) {
-        var opened = this._openUnreadBadge(candidates[c].node, candidates[c].source, screenWidth, screenHeight);
+        var opened = this._openUnreadBadge(candidates[c].node, candidates[c].source, screenWidth, screenHeight, candidates[c].chatName);
         if (opened) return opened;
       }
       var diagnostics = { genericNodeCount: 0, numericCandidateCount: 0, rightSideCandidateCount: 0 };
@@ -831,6 +888,139 @@
     return chosen;
   };
 
+  Adapter.prototype._isEllipsizedChatName = function (value) {
+    var text = this._normalizeUiText(value);
+    return text.slice(-3) === "..." || text.slice(-1) === String.fromCharCode(8230);
+  };
+
+  Adapter.prototype._readRemarkEditorText = function () {
+    var selector = this._selector("className", "android.widget.EditText");
+    var nodes = selector && selector.find ? selector.find() : null;
+    var size = Math.min(this._collectionSize(nodes), 20);
+    var ignored = ["搜索", "请输入备注", "设置备注和标签"];
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      if (!text || ignored.indexOf(text) >= 0) continue;
+      return text;
+    }
+    return "";
+  };
+
+  Adapter.prototype._readVisibleContactName = function () {
+    var selector = this._selector("className", "android.widget.TextView");
+    var nodes = selector && selector.find ? selector.find() : null;
+    var size = Math.min(this._collectionSize(nodes), 2000);
+    var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
+    var ignored = ["微信", "通讯录", "发现", "我", "返回", "搜索", "关闭", "聊天信息", "发消息", "视频通话", "音视频通话", "设置备注和标签", "微信号", "手机号", "地区", "个性签名", "更多", "发送", "置顶聊天", "消息免打扰", "查找聊天记录"];
+    var candidates = [];
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      if (!text || ignored.indexOf(text) >= 0 || /^微信号\s*[:：]/.test(text)) continue;
+      if (/^\d+$/.test(text) || this._isChatTimestampText(text)) continue;
+      if (this._isEllipsizedChatName(text) || text.length > 80) continue;
+      var bounds = this._uiBoundsMeta(node);
+      if (!bounds || bounds.top > screenHeight * 0.42) continue;
+      candidates.push({ text: text, bounds: bounds });
+    }
+    candidates.sort(function (a, b) {
+      return b.text.length - a.text.length || a.bounds.top - b.bounds.top;
+    });
+    return candidates.length ? candidates[0].text : "";
+  };
+
+  Adapter.prototype._findChatInfoMember = function (chatName) {
+    var expected = this._normalizeUiText(chatName);
+    if (expected) {
+      var exact = this._findFirstByTexts([expected], 800);
+      if (exact) return exact;
+    }
+    var selector = this._selector("className", "android.widget.TextView");
+    var nodes = selector && selector.find ? selector.find() : null;
+    var size = Math.min(this._collectionSize(nodes), 1000);
+    var screenHeight = (typeof device !== "undefined" && device.height) ? Number(device.height) : 1920;
+    var ignored = ["聊天信息", "置顶聊天", "消息免打扰", "查找聊天记录", "设置备注和标签", "返回", "更多"];
+    var candidates = [];
+    for (var i = 0; i < size; i += 1) {
+      var node = this._collectionGet(nodes, i);
+      var text = this._normalizeUiText(this._nodeText(node));
+      if (!text || ignored.indexOf(text) >= 0 || /^\d+$/.test(text) || this._isChatTimestampText(text)) continue;
+      var bounds = this._uiBoundsMeta(node);
+      if (!bounds || bounds.top > screenHeight * 0.48) continue;
+      candidates.push({ node: node, text: text, bounds: bounds });
+    }
+    candidates.sort(function (a, b) {
+      return Math.abs(a.bounds.centerY - b.bounds.centerY) || b.text.length - a.text.length;
+    });
+    return candidates.length ? candidates[0].node : null;
+  };
+
+  Adapter.prototype._readContactRemarkPage = function () {
+    var editorText = this._readRemarkEditorText();
+    if (editorText && !this._isEllipsizedChatName(editorText)) {
+      return { chatName: editorText, source: "remark_editor" };
+    }
+    var settingButton = this._findFirstByTexts(["设置备注和标签"], 800);
+    if (settingButton) return { settingButton: settingButton };
+    var visibleName = this._readVisibleContactName();
+    if (visibleName) return { chatName: visibleName, source: "contact_profile" };
+    return {};
+  };
+
+  Adapter.prototype.readCurrentChatRemark = function (chatName) {
+    if (!this.isChatScreen()) return { ok: false, code: "CHAT_SCREEN_REQUIRED", chatName: String(chatName || "") };
+    var titleCandidates = this._collectCurrentChatTitleCandidates();
+    var titleNode = titleCandidates.length ? titleCandidates[0].node : null;
+    if (!titleNode || !this._click(titleNode)) {
+      return { ok: false, code: "CHAT_TITLE_CLICK_FAILED", chatName: String(chatName || "") };
+    }
+    this._sleep(700);
+    var depth = 1;
+    var memberClicked = false;
+    var settingClicked = false;
+    var resolved = "";
+    var source = "";
+    try {
+      for (var step = 0; step < 4; step += 1) {
+        var page = this._readContactRemarkPage();
+        if (page.chatName) {
+          resolved = page.chatName;
+          source = page.source || "contact_profile";
+          if (!this._isEllipsizedChatName(resolved)) break;
+        }
+        if (page.settingButton && !settingClicked) {
+          if (this._click(page.settingButton)) {
+            settingClicked = true;
+            depth += 1;
+            this._sleep(500);
+            continue;
+          }
+        }
+        if (!memberClicked) {
+          var member = this._findChatInfoMember(chatName || (titleCandidates[0] && titleCandidates[0].text) || "");
+          if (member && this._click(member)) {
+            memberClicked = true;
+            depth += 1;
+            this._sleep(700);
+            continue;
+          }
+        }
+        break;
+      }
+    } catch (error) {
+      this._detail("读取微信完整备注名异常", { error: String(error) });
+    } finally {
+      for (var i = 0; i < depth; i += 1) this.goHome();
+    }
+    if (resolved && !this._isEllipsizedChatName(resolved)) {
+      this._detail("已读取微信好友完整备注名", { chatName: resolved, source: source || "contact_profile" });
+      return { ok: true, chatName: resolved, source: source || "contact_profile" };
+    }
+    this._detail("未读取到微信好友完整备注名", { chatName: String(chatName || ""), resolved: resolved });
+    return { ok: false, code: "FULL_CHAT_NAME_NOT_FOUND", chatName: String(chatName || "") };
+  };
+
   Adapter.prototype._readWechatIdFromCurrentPage = function () {
     var selector = this._selector("classNameMatches", ".+");
     var nodes = this._findAll(selector);
@@ -900,13 +1090,17 @@
     this._log("info", "已读取好友微信号", { chatName: chatName, wechatId: profile.wechatId });
     return { ok: true, chatName: chatName, wechatId: profile.wechatId };
   };
-  Adapter.prototype.readLatestMessage = function (chatName) {
+  Adapter.prototype.readLatestMessage = function (chatName, options) {
     var resolvedChatName = String(chatName || "");
+    var preferProvidedChatName = !!(options && options.preferProvidedChatName);
     try {
-      // Notification titles may be truncated or unrelated to the current chat.
-      // The title rendered in the open chat header is the contact remark name.
-      var currentChatName = this.readCurrentChatName ? this.readCurrentChatName() : "";
-      if (currentChatName) resolvedChatName = currentChatName;
+      // Foreground list polling supplies the authoritative remark from the
+      // conversation row. Notification handling has no row object, so it uses
+      // the title rendered in the open chat header instead.
+      if (!preferProvidedChatName) {
+        var currentChatName = this.readCurrentChatName ? this.readCurrentChatName() : "";
+        if (currentChatName) resolvedChatName = currentChatName;
+      }
     } catch (ignoreChatName) {}
     this._detail("读取微信私聊最新气泡", { chatName: resolvedChatName });
     var selector = this._selector("classNameMatches", ".+");
@@ -938,6 +1132,13 @@
     if (!values.length) return { ok: false, code: "MESSAGE_NOT_FOUND" };
     values.sort(function (a, b) { return b.centerY - a.centerY; });
     var latest = values[0];
+    // The conversation list may expose an ellipsized remark. Resolve the full
+    // remark only for that case, after the message bubble has been captured.
+    if (this._isEllipsizedChatName(resolvedChatName) && this.readCurrentChatRemark) {
+      var fullName = this.readCurrentChatRemark(resolvedChatName);
+      if (fullName && fullName.ok && fullName.chatName) resolvedChatName = fullName.chatName;
+    }
+    this._detail("读取微信私聊最新气泡", { chatName: resolvedChatName });
     this._log("info", "已读取微信私聊最新消息", { chatName: resolvedChatName, text: latest.text, direction: latest.direction });
     return { ok: true, chatName: resolvedChatName, text: latest.text, direction: latest.direction, observedAt: Date.now() };
   };
@@ -976,8 +1177,3 @@
     this.WxBotWechatAdapter = { Adapter: Adapter };
   }
 }());
-
-
-
-
-

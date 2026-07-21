@@ -241,7 +241,7 @@
               logger.debug("微信前台轮询未打开未读对话", { code: opened && opened.code || "UNKNOWN" });
               return;
             }
-            logger.detail("微信聊天列表检测到未读角标并进入会话", { unreadCount: opened.unreadCount || 0 });
+            logger.detail("微信聊天列表检测到未读角标并进入会话", { unreadCount: opened.unreadCount || 0, chatName: opened.chatName || "" });
             inChat = adapter.isChatScreen();
           }
           if (!inChat) {
@@ -249,8 +249,8 @@
             return;
           }
 
-          var chatName = adapter.readCurrentChatName ? adapter.readCurrentChatName() : "";
-          var latest = adapter.readLatestMessage(chatName);
+          var chatName = opened && opened.chatName || (adapter.readCurrentChatName ? adapter.readCurrentChatName() : "");
+          var latest = adapter.readLatestMessage(chatName, { preferProvidedChatName: !!(opened && opened.chatName) });
           if (latest && latest.ok) {
             handleMessageNotification(null, latest.chatName || chatName || "当前聊天", latest.text, true);
           }

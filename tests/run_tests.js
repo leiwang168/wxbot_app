@@ -111,6 +111,39 @@ test("wechat unread badge uses the avatar-side red badge position", function () 
   assert.strictEqual(candidates[0].bounds.centerX, 138);
 });
 
+test("wechat unread badge carries the conversation-list contact remark", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  var badge = {
+    text: function () { return "1"; },
+    bounds: function () { return { left: 117, top: 322, right: 159, bottom: 365 }; },
+    parent: function () { return null; }
+  };
+  var nodes = [
+    badge,
+    { text: function () { return "磊哥TS"; }, bounds: function () { return { left: 176, top: 330, right: 390, bottom: 375 }; } },
+    { text: function () { return "我要买啊"; }, bounds: function () { return { left: 176, top: 385, right: 420, bottom: 430 }; } },
+    { text: function () { return "上午9:24"; }, bounds: function () { return { left: 780, top: 330, right: 900, bottom: 375 }; } }
+  ];
+  adapter._selector = function () { return {}; };
+  adapter._findAll = function () { return nodes; };
+  var candidates = adapter._collectUnreadBadgeCandidates(922, 2048);
+  assert.strictEqual(candidates.length, 1);
+  assert.strictEqual(candidates[0].chatName, "磊哥TS");
+});
+
+test("wechat latest-message keeps the supplied conversation-list remark", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  adapter.readCurrentChatName = function () { return "错误的聊天标题"; };
+  adapter._selector = function () {
+    return { find: function () {
+      return [{ text: function () { return "我要买啊"; }, bounds: function () { return { left: 80, top: 1000, right: 360, bottom: 1060 }; } }];
+    } };
+  };
+  var result = adapter.readLatestMessage("磊哥TS", { preferProvidedChatName: true });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.chatName, "磊哥TS");
+});
+
 test("scanUnreadBadges never clicks the contact row", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
   var clicked = 0;
@@ -190,6 +223,50 @@ test("wechat latest-message ignores Chinese timestamp labels", function () {
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.text, "你好");
 });
+test("wechat long conversation name is recognized as ellipsized", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  assert.strictEqual(adapter._isEllipsizedChatName("磊哥年轻牛逼威武霸气帅气-1..."), true);
+  assert.strictEqual(adapter._isEllipsizedChatName("磊哥年轻牛逼威武霸气帅气-1又长备注"), false);
+});
+
+test("wechat latest-message resolves a full remark after list truncation", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  adapter.readCurrentChatRemark = function () {
+    return { ok: true, chatName: "磊哥年轻牛逼威武霸气帅气-1又长备注", source: "remark_editor" };
+  };
+  adapter._selector = function () {
+    return { find: function () {
+      return [{ text: function () { return "最新消息"; }, bounds: function () { return { left: 80, top: 1000, right: 360, bottom: 1060 }; } }];
+    } };
+  };
+  var result = adapter.readLatestMessage("磊哥年轻牛逼威武霸气帅气-1...", { preferProvidedChatName: true });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.chatName, "磊哥年轻牛逼威武霸气帅气-1又长备注");
+});
+
+test("wechat full remark navigation returns to the chat page", function () {
+  var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
+  var title = {};
+  var setting = {};
+  var clicks = [];
+  var backCount = 0;
+  var pageIndex = 0;
+  adapter.isChatScreen = function () { return true; };
+  adapter._collectCurrentChatTitleCandidates = function () { return [{ node: title, text: "磊哥年轻牛逼威武霸气帅气-1..." }]; };
+  adapter._click = function (node) { clicks.push(node); return true; };
+  adapter._readContactRemarkPage = function () {
+    pageIndex += 1;
+    return pageIndex === 1 ? { settingButton: setting } : { chatName: "磊哥年轻牛逼威武霸气帅气-1又长备注", source: "remark_editor" };
+  };
+  adapter._sleep = function () {};
+  adapter.goHome = function () { backCount += 1; return { ok: true }; };
+  var result = adapter.readCurrentChatRemark("磊哥年轻牛逼威武霸气帅气-1...");
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.chatName, "磊哥年轻牛逼威武霸气帅气-1又长备注");
+  assert.strictEqual(clicks.length, 2);
+  assert.strictEqual(backCount, 2);
+});
+
 test("wechat profile reads an adjacent WeChat ID value", function () {
   var adapter = new WechatAdapter({ packageName: "com.tencent.mm" });
   var nodes = [
